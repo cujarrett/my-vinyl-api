@@ -89,12 +89,26 @@ func (rw *statusResponseWriter) WriteHeader(code int) {
 	rw.ResponseWriter.WriteHeader(code)
 }
 
+// metricsSkipPaths lists paths that are excluded from Prometheus instrumentation
+// to avoid polluting metrics with noise (probes, browser auto-requests, etc.).
+var metricsSkipPaths = map[string]struct{}{
+	"/favicon.ico": {},
+	"/health":      {},
+	"/healthz":     {},
+	"/robots.txt":  {},
+}
+
 // metricsMiddleware records http_requests_total and http_request_duration_seconds
-// for every request passing through it. It is a no-op when metrics are not
-// initialised (e.g. in unit tests that construct app directly).
+// for every request passing through it. Paths in metricsSkipPaths are not
+// recorded. It is a no-op when metrics are not initialised (e.g. in unit tests
+// that construct app directly).
 func (a *app) metricsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if a.requestsTotal == nil || a.requestDuration == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if _, skip := metricsSkipPaths[r.URL.Path]; skip {
 			next.ServeHTTP(w, r)
 			return
 		}

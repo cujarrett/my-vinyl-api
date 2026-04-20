@@ -231,12 +231,45 @@ func TestMetricsMiddlewareRecordsCounter(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req := httptest.NewRequest(http.MethodGet, "/collection", nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
-	if got := testutil.ToFloat64(requestsTotal.WithLabelValues("GET", "/health", "200")); got != 1 {
+	if got := testutil.ToFloat64(requestsTotal.WithLabelValues("GET", "/collection", "200")); got != 1 {
 		t.Fatalf("expected counter=1, got %v", got)
+	}
+}
+
+// TestMetricsMiddlewareSkipsPaths verifies that requests to noise paths
+// (health probes, favicon, robots.txt) are not recorded in the counter.
+func TestMetricsMiddlewareSkipsPaths(t *testing.T) {
+	requestsTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "test_skip_http_requests_total",
+		Help: "test",
+	}, []string{"method", "path", "status_code"})
+	requestDuration := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "test_skip_http_request_duration_seconds",
+		Help:    "test",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"method", "path"})
+
+	a := &app{requestsTotal: requestsTotal, requestDuration: requestDuration}
+	handler := a.metricsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	for _, path := range []string{"/health", "/healthz", "/favicon.ico", "/robots.txt"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+	}
+
+	// None of the skipped paths should have incremented the counter.
+	if got := testutil.ToFloat64(requestsTotal.WithLabelValues("GET", "/health", "200")); got != 0 {
+		t.Fatalf("/health: expected counter=0, got %v", got)
+	}
+	if got := testutil.ToFloat64(requestsTotal.WithLabelValues("GET", "/favicon.ico", "200")); got != 0 {
+		t.Fatalf("/favicon.ico: expected counter=0, got %v", got)
 	}
 }
 
