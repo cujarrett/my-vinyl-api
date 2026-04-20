@@ -95,7 +95,7 @@ func (a *app) fetchPage(ctx context.Context, token, url string) (discogsCollecti
 	}
 	// defer runs when the surrounding function returns, ensuring the response
 	// body is always closed even if we return early with an error.
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return discogsCollection{}, fmt.Errorf("upstream status %d", resp.StatusCode)
