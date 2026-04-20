@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+  pull_request:
 
 jobs:
   test:
@@ -25,6 +25,7 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     needs: test
+    if: github.ref == 'refs/heads/main'
 
     permissions:
       contents: read
