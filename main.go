@@ -8,7 +8,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // version is set at build time via -ldflags="-X main.version=x.y.z".
@@ -68,6 +72,39 @@ type app struct {
 	httpClient      *http.Client
 	token           string
 	defaultUsername string
+	collectionSize  prometheus.Gauge
+	requestsTotal   *prometheus.CounterVec
+	requestDuration *prometheus.HistogramVec
+}
+
+// statusResponseWriter wraps http.ResponseWriter to capture the status code
+// written by a handler so the metrics middleware can record it.
+type statusResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (rw *statusResponseWriter) WriteHeader(code int) {
+	rw.statusCode = code
+	rw.ResponseWriter.WriteHeader(code)
+}
+
+// metricsMiddleware records http_requests_total and http_request_duration_seconds
+// for every request passing through it. It is a no-op when metrics are not
+// initialised (e.g. in unit tests that construct app directly).
+func (a *app) metricsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if a.requestsTotal == nil || a.requestDuration == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		rw := &statusResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+		start := time.Now()
+		next.ServeHTTP(rw, r)
+		duration := time.Since(start).Seconds()
+		a.requestsTotal.WithLabelValues(r.Method, r.URL.Path, strconv.Itoa(rw.statusCode)).Inc()
+		a.requestDuration.WithLabelValues(r.Method, r.URL.Path).Observe(duration)
+	})
 }
 
 // fetchPage makes a single authenticated GET request to Discogs and decodes
@@ -197,6 +234,10 @@ func (a *app) collectionHandler(w http.ResponseWriter, r *http.Request) {
 		items = append(items, item)
 	}
 
+	if a.collectionSize != nil {
+		a.collectionSize.Set(float64(len(items)))
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	// json.NewEncoder writes directly to the ResponseWriter — no intermediate buffer.
 	if err := json.NewEncoder(w).Encode(items); err != nil {
@@ -230,6 +271,34 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
+	metricsPort := os.Getenv("METRICS_PORT")
+	if metricsPort == "" {
+		metricsPort = "9090"
+	}
+
+	// Set up a dedicated Prometheus registry so /metrics is never accidentally
+	// served on the main port and the default global registry is not polluted.
+	reg := prometheus.NewRegistry()
+	requestsTotal := prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "http_requests_total",
+			Help: "Total number of HTTP requests by method, path, and status code.",
+		},
+		[]string{"method", "path", "status_code"},
+	)
+	requestDuration := prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "http_request_duration_seconds",
+			Help:    "HTTP request duration in seconds by method and path.",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"method", "path"},
+	)
+	collectionSize := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "discogs_collection_size",
+		Help: "Number of records returned from Discogs on the most recent successful fetch.",
+	})
+	reg.MustRegister(requestsTotal, requestDuration, collectionSize)
 
 	// Initialise the app with its dependencies.
 	// Use a dedicated client timeout so upstream calls don't hang indefinitely.
@@ -238,6 +307,9 @@ func main() {
 		httpClient:      &http.Client{Timeout: 15 * time.Second},
 		token:           os.Getenv("DISCOGS_TOKEN"),
 		defaultUsername: "cujarrett",
+		collectionSize:  collectionSize,
+		requestsTotal:   requestsTotal,
+		requestDuration: requestDuration,
 	}
 	// Fail fast at startup rather than returning errors on every request.
 	if a.token == "" {
@@ -249,9 +321,28 @@ func main() {
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/collection", a.collectionHandler)
 
-	// Wrap the whole mux in the CORS middleware so every route gets the header.
+	// Wrap the whole mux: metrics outermost so every request is counted, then CORS.
 	// Only the SPA origin is allowed — browsers will block requests from any other site.
-	handler := corsMiddleware("https://myvinyl.mattjarrett.dev", mux)
+	handler := a.metricsMiddleware(corsMiddleware("https://myvinyl.mattjarrett.dev", mux))
+
+	// Start the metrics server on a separate port. This port is never publicly
+	// exposed — only the in-cluster Prometheus scraper reaches it.
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	metricsSrv := &http.Server{
+		Addr:              ":" + metricsPort,
+		Handler:           metricsMux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	go func() {
+		log.Printf("metrics server listening on :%s", metricsPort)
+		if err := metricsSrv.ListenAndServe(); err != nil {
+			log.Fatal(err)
+		}
+	}()
 
 	log.Printf("my-vinyl-api %s listening on :%s", version, port)
 	srv := &http.Server{

@@ -5,6 +5,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // TestHealthHandler verifies the health endpoint returns 200 with {"status":"ok","version":"..."}.
@@ -207,5 +210,71 @@ func TestCORSHeader(t *testing.T) {
 
 	if got := w.Header().Get("Access-Control-Allow-Origin"); got != wantOrigin {
 		t.Fatalf("expected CORS %q header, got %q", wantOrigin, got)
+	}
+}
+
+// TestMetricsMiddlewareRecordsCounter verifies that metricsMiddleware increments
+// http_requests_total with the correct method, path, and status_code labels.
+func TestMetricsMiddlewareRecordsCounter(t *testing.T) {
+	requestsTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "test_http_requests_total",
+		Help: "test",
+	}, []string{"method", "path", "status_code"})
+	requestDuration := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "test_http_request_duration_seconds",
+		Help:    "test",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"method", "path"})
+
+	a := &app{requestsTotal: requestsTotal, requestDuration: requestDuration}
+	handler := a.metricsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if got := testutil.ToFloat64(requestsTotal.WithLabelValues("GET", "/health", "200")); got != 1 {
+		t.Fatalf("expected counter=1, got %v", got)
+	}
+}
+
+// TestCollectionSizeGaugeIsSet verifies that a successful collection fetch sets
+// the discogs_collection_size gauge to the number of items returned.
+func TestCollectionSizeGaugeIsSet(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(discogsCollection{ //nolint:errcheck
+			Releases: []discogsRelease{
+				{ID: 1, BasicInformation: discogsBasicInfo{Title: "A", Year: 2001}},
+				{ID: 2, BasicInformation: discogsBasicInfo{Title: "B", Year: 2002}},
+			},
+		})
+	}))
+	defer ts.Close()
+
+	gauge := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "test_discogs_collection_size",
+		Help: "test",
+	})
+
+	a := &app{
+		discogsBase:     ts.URL,
+		httpClient:      ts.Client(),
+		token:           "test-token",
+		defaultUsername: "test-user",
+		collectionSize:  gauge,
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/collection", nil)
+	w := httptest.NewRecorder()
+	a.collectionHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if got := testutil.ToFloat64(gauge); got != 2 {
+		t.Fatalf("expected gauge=2, got %v", got)
 	}
 }
