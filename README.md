@@ -8,7 +8,7 @@ Go proxy that exposes a Discogs vinyl collection as a clean JSON API.
 |---|---|---|
 | `GET` | `/collection` | Paginated fetch of all releases, trimmed to `[{id, artist, title, year, label, cover_url}]` |
 | `GET` | `/collection?username=foo` | Same, for a different Discogs user (defaults to `cujarrett`) |
-| `GET` | `/health` | Returns `{"status":"ok"}` |
+| `GET` | `/health` | Returns `{"status":"ok","version":"..."}` |
 
 ## Environment variables
 

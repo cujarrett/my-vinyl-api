@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"time"
 )
 
 // version is set at build time via -ldflags="-X main.version=x.y.z".
@@ -154,7 +156,7 @@ func (a *app) collectionHandler(w http.ResponseWriter, r *http.Request) {
 	// Build the first page URL. Discogs folder 0 = "All" — the entire collection.
 	nextURL := fmt.Sprintf(
 		"%s/users/%s/collection/folders/0/releases?per_page=100",
-		a.discogsBase, username,
+		a.discogsBase, url.PathEscape(username),
 	)
 
 	// Follow pagination until Discogs stops returning a "next" URL.
@@ -167,7 +169,11 @@ func (a *app) collectionHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		releases = append(releases, page.Releases...) // ... spreads the slice
-		nextURL = page.Pagination.URLs.Next           // "" on the last page, ending the loop
+		nextURL, err = a.sanitizePaginationURL(page.Pagination.URLs.Next)
+		if err != nil {
+			writeJSONError(w, "failed to fetch collection", http.StatusBadGateway)
+			return
+		}
 	}
 
 	// Trim each release down to only the fields the SPA needs.
@@ -198,6 +204,27 @@ func (a *app) collectionHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (a *app) sanitizePaginationURL(raw string) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+	baseURL, err := url.Parse(a.discogsBase)
+	if err != nil {
+		return "", err
+	}
+	nextURL, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	if !nextURL.IsAbs() {
+		nextURL = baseURL.ResolveReference(nextURL)
+	}
+	if nextURL.Scheme != baseURL.Scheme || nextURL.Host != baseURL.Host {
+		return "", fmt.Errorf("unexpected pagination URL host/scheme")
+	}
+	return nextURL.String(), nil
+}
+
 func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -205,10 +232,10 @@ func main() {
 	}
 
 	// Initialise the app with its dependencies.
-	// http.DefaultClient is Go's built-in HTTP client with sensible defaults.
+	// Use a dedicated client timeout so upstream calls don't hang indefinitely.
 	a := &app{
 		discogsBase:     "https://api.discogs.com",
-		httpClient:      http.DefaultClient,
+		httpClient:      &http.Client{Timeout: 15 * time.Second},
 		token:           os.Getenv("DISCOGS_TOKEN"),
 		defaultUsername: "cujarrett",
 	}
@@ -227,8 +254,15 @@ func main() {
 	handler := corsMiddleware("https://myvinyl.mattjarrett.dev", mux)
 
 	log.Printf("my-vinyl-api %s listening on :%s", version, port)
-	// ListenAndServe blocks forever serving requests. It only returns on error.
-	if err := http.ListenAndServe(":"+port, handler); err != nil {
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	if err := srv.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
 }

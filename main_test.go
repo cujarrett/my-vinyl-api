@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// TestHealthHandler verifies the health endpoint returns 200 with {"status":"ok"}.
+// TestHealthHandler verifies the health endpoint returns 200 with {"status":"ok","version":"..."}.
 // httptest.NewRequest builds a synthetic *http.Request without opening a real socket.
 // httptest.NewRecorder is a fake ResponseWriter that captures the status code,
 // headers, and body written by the handler so we can assert on them.
@@ -145,6 +145,48 @@ func TestCollectionPagination(t *testing.T) {
 	}
 	if items[0].Artist != "Artist A" || items[1].Artist != "Artist B" {
 		t.Fatalf("unexpected artists: %q, %q", items[0].Artist, items[1].Artist)
+	}
+}
+
+func TestCollectionUsernameIsEscaped(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.EscapedPath() != "/users/evil%2Fuser/collection/folders/0/releases" {
+			t.Errorf("unexpected escaped path: %s", r.URL.EscapedPath())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(discogsCollection{}) //nolint:errcheck
+	}))
+	defer ts.Close()
+
+	a := &app{discogsBase: ts.URL, httpClient: ts.Client(), token: "test-token", defaultUsername: "env-user"}
+	req := httptest.NewRequest(http.MethodGet, "/collection?username=evil/user", nil)
+	w := httptest.NewRecorder()
+	a.collectionHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestCollectionRejectsUnexpectedPaginationHost(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(discogsCollection{ //nolint:errcheck
+			Pagination: discogsPagination{
+				URLs: discogsPaginationURLs{Next: "https://example.com/not-discogs"},
+			},
+			Releases: []discogsRelease{{ID: 1}},
+		})
+	}))
+	defer ts.Close()
+
+	a := &app{discogsBase: ts.URL, httpClient: ts.Client(), token: "test-token", defaultUsername: "test-user"}
+	req := httptest.NewRequest(http.MethodGet, "/collection", nil)
+	w := httptest.NewRecorder()
+	a.collectionHandler(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d", w.Code)
 	}
 }
 
