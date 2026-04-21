@@ -6,9 +6,28 @@ Go proxy that exposes a Discogs vinyl collection as a clean JSON API.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/collection` | Paginated fetch of all releases, trimmed to `[{id, artist, title, year, label, cover_url}]` |
-| `GET` | `/collection?username=foo` | Same, for a different Discogs user (defaults to `cujarrett`) |
+| `GET` | `/collection` | Returns one page of the collection as a paginated envelope |
 | `GET` | `/health` | Returns `{"status":"ok","version":"..."}` |
+
+### `GET /collection` query params
+
+| Param | Default | Description |
+|---|---|---|
+| `username` | `cujarrett` | Discogs username |
+| `page` | `1` | Page number (>= 1, must not exceed total pages) |
+
+Response shape:
+
+```json
+{
+  "page": 1,
+  "pages": 12,
+  "items": 573,
+  "releases": [
+    { "id": 1, "artist": "...", "title": "...", "year": 2001, "label": "...", "cover_url": "..." }
+  ]
+}
+```
 
 ## Environment variables
 

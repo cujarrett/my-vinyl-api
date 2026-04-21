@@ -42,12 +42,11 @@ type discogsRelease struct {
 	BasicInformation discogsBasicInfo `json:"basic_information"`
 }
 
-type discogsPaginationURLs struct {
-	Next string `json:"next"`
-}
-
 type discogsPagination struct {
-	URLs discogsPaginationURLs `json:"urls"`
+	Page    int `json:"page"`
+	Pages   int `json:"pages"`
+	PerPage int `json:"per_page"`
+	Items   int `json:"items"`
 }
 
 type discogsCollection struct {
@@ -55,7 +54,7 @@ type discogsCollection struct {
 	Releases   []discogsRelease  `json:"releases"`
 }
 
-// Outbound shape
+// Outbound shapes
 
 type collectionItem struct {
 	ID       int    `json:"id"`
@@ -64,6 +63,14 @@ type collectionItem struct {
 	Year     int    `json:"year"`
 	Label    string `json:"label"`
 	CoverURL string `json:"cover_url"`
+}
+
+// collectionResponse is the envelope returned by GET /collection.
+type collectionResponse struct {
+	Page     int              `json:"page"`
+	Pages    int              `json:"pages"`
+	Items    int              `json:"items"`
+	Releases []collectionItem `json:"releases"`
 }
 
 // app holds dependencies so handlers are testable without globals.
@@ -122,14 +129,8 @@ func (a *app) metricsMiddleware(next http.Handler) http.Handler {
 }
 
 // fetchPage makes a single authenticated GET request to Discogs and decodes
-// the response into a discogsCollection. The caller is responsible for
-// following pagination by calling fetchPage again with the next URL.
-//
-// ctx is passed through so the request is cancelled if the original HTTP
-// request from the SPA is cancelled (e.g. the user closes the browser tab).
+// the response into a discogsCollection.
 func (a *app) fetchPage(ctx context.Context, token, url string) (discogsCollection, error) {
-	// NewRequestWithContext attaches a context so the request respects
-	// cancellation and deadlines from the caller.
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return discogsCollection{}, err
@@ -137,23 +138,18 @@ func (a *app) fetchPage(ctx context.Context, token, url string) (discogsCollecti
 
 	// Discogs requires a descriptive User-Agent — requests without one are rejected.
 	req.Header.Set("User-Agent", "my-vinyl-api/1.0 +https://github.com/cujarrett/my-vinyl-api")
-	// Discogs token auth: pass the token in the Authorization header.
 	req.Header.Set("Authorization", "Discogs token="+token)
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
 		return discogsCollection{}, err
 	}
-	// defer runs when the surrounding function returns, ensuring the response
-	// body is always closed even if we return early with an error.
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return discogsCollection{}, fmt.Errorf("upstream status %d", resp.StatusCode)
 	}
 
-	// Decode streams directly from the response body into the struct —
-	// more memory-efficient than reading the whole body into a []byte first.
 	var dc discogsCollection
 	if err := json.NewDecoder(resp.Body).Decode(&dc); err != nil {
 		return discogsCollection{}, err
@@ -171,14 +167,12 @@ func writeJSONError(w http.ResponseWriter, msg string, code int) {
 	w.Write(b) //nolint:errcheck
 }
 
-// corsMiddleware wraps any handler and adds the CORS header to every response.
+// corsMiddleware adds the CORS header to every response.
 // allowedOrigin must be the exact origin of the SPA (scheme + hostname, no path).
-// Returning a new http.HandlerFunc (which satisfies the http.Handler interface)
-// is the standard Go pattern for middleware.
 func corsMiddleware(allowedOrigin string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
-		next.ServeHTTP(w, r) // call the wrapped handler
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -189,12 +183,10 @@ func healthHandler(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintf(w, `{"status":"ok","version":%q}`, version) //nolint:errcheck
 }
 
-// collectionHandler fetches every page of a Discogs collection and returns
-// the full list as a single flat JSON array. All pagination is handled here
-// so the SPA only has to make one request.
+// collectionHandler proxies a single page of the Discogs collection and returns
+// it as a paginated envelope. The page and per_page query params are forwarded
+// directly to Discogs so the Discogs-reported pagination metadata is used as-is.
 func (a *app) collectionHandler(w http.ResponseWriter, r *http.Request) {
-	// Allow the caller to override the default username via query param.
-	// r.URL.Query() parses the query string; Get() returns "" if not present.
 	username := a.defaultUsername
 	if q := r.URL.Query().Get("username"); q != "" {
 		username = q
@@ -204,34 +196,41 @@ func (a *app) collectionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build the first page URL. Discogs folder 0 = "All" — the entire collection.
-	nextURL := fmt.Sprintf(
-		"%s/users/%s/collection/folders/0/releases?per_page=100",
-		a.discogsBase, url.PathEscape(username),
-	)
-
-	// Follow pagination until Discogs stops returning a "next" URL.
-	// append on a nil slice is valid in Go — it initialises the slice for us.
-	var releases []discogsRelease
-	for nextURL != "" {
-		page, err := a.fetchPage(r.Context(), a.token, nextURL)
-		if err != nil {
-			writeJSONError(w, "failed to fetch collection", http.StatusBadGateway)
-			return
-		}
-		releases = append(releases, page.Releases...) // ... spreads the slice
-		nextURL, err = a.sanitizePaginationURL(page.Pagination.URLs.Next)
-		if err != nil {
-			writeJSONError(w, "failed to fetch collection", http.StatusBadGateway)
+	// Parse page param (default 1, must be >= 1).
+	page := 1
+	if q := r.URL.Query().Get("page"); q != "" {
+		var err error
+		page, err = strconv.Atoi(q)
+		if err != nil || page < 1 {
+			writeJSONError(w, "page must be a positive integer", http.StatusBadRequest)
 			return
 		}
 	}
 
-	// Trim each release down to only the fields the SPA needs.
-	// make([]T, 0, n) pre-allocates capacity so append doesn't have to
-	// reallocate the backing array as it grows.
-	items := make([]collectionItem, 0, len(releases))
-	for _, rel := range releases {
+	pageURL := fmt.Sprintf(
+		"%s/users/%s/collection/folders/0/releases?per_page=50&page=%d",
+		a.discogsBase, url.PathEscape(username), page,
+	)
+
+	dc, err := a.fetchPage(r.Context(), a.token, pageURL)
+	if err != nil {
+		writeJSONError(w, "failed to fetch collection", http.StatusBadGateway)
+		return
+	}
+
+	// Validate the requested page doesn't exceed the Discogs total.
+	// Guard against pages=0 for empty collections by treating it as 1.
+	totalPages := dc.Pagination.Pages
+	if totalPages == 0 {
+		totalPages = 1
+	}
+	if page > totalPages {
+		writeJSONError(w, "page out of range", http.StatusBadRequest)
+		return
+	}
+
+	items := make([]collectionItem, 0, len(dc.Releases))
+	for _, rel := range dc.Releases {
 		item := collectionItem{
 			ID:       rel.ID,
 			Title:    rel.BasicInformation.Title,
@@ -249,35 +248,20 @@ func (a *app) collectionHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.collectionSize != nil {
-		a.collectionSize.Set(float64(len(items)))
+		a.collectionSize.Set(float64(dc.Pagination.Items))
+	}
+
+	resp := collectionResponse{
+		Page:     dc.Pagination.Page,
+		Pages:    dc.Pagination.Pages,
+		Items:    dc.Pagination.Items,
+		Releases: items,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	// json.NewEncoder writes directly to the ResponseWriter — no intermediate buffer.
-	if err := json.NewEncoder(w).Encode(items); err != nil {
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		log.Printf("encode error: %v", err)
 	}
-}
-
-func (a *app) sanitizePaginationURL(raw string) (string, error) {
-	if raw == "" {
-		return "", nil
-	}
-	baseURL, err := url.Parse(a.discogsBase)
-	if err != nil {
-		return "", err
-	}
-	nextURL, err := url.Parse(raw)
-	if err != nil {
-		return "", err
-	}
-	if !nextURL.IsAbs() {
-		nextURL = baseURL.ResolveReference(nextURL)
-	}
-	if nextURL.Scheme != baseURL.Scheme || nextURL.Host != baseURL.Host {
-		return "", fmt.Errorf("unexpected pagination URL host/scheme")
-	}
-	return nextURL.String(), nil
 }
 
 func main() {
@@ -314,8 +298,6 @@ func main() {
 	})
 	reg.MustRegister(requestsTotal, requestDuration, collectionSize)
 
-	// Initialise the app with its dependencies.
-	// Use a dedicated client timeout so upstream calls don't hang indefinitely.
 	a := &app{
 		discogsBase:     "https://api.discogs.com",
 		httpClient:      &http.Client{Timeout: 15 * time.Second},
@@ -330,7 +312,6 @@ func main() {
 		log.Fatal("DISCOGS_TOKEN is required")
 	}
 
-	// ServeMux is Go's built-in request router. Each pattern maps to a handler function.
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/collection", a.collectionHandler)
