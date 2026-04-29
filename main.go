@@ -8,11 +8,14 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/redis/go-redis/v9"
 )
 
 // version is set at build time via -ldflags="-X main.version=x.y.z".
@@ -82,6 +85,18 @@ type app struct {
 	collectionSize  prometheus.Gauge
 	requestsTotal   *prometheus.CounterVec
 	requestDuration *prometheus.HistogramVec
+	redisClient     *redis.Client // nil when cache is not configured
+	cacheTTL        time.Duration
+}
+
+// readBindingFile reads a single key from a Service Binding volume mount.
+// Returns an empty string if the file does not exist or cannot be read.
+func readBindingFile(root, binding, key string) string {
+	b, err := os.ReadFile(filepath.Join(root, binding, key))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
 }
 
 // statusResponseWriter wraps http.ResponseWriter to capture the status code
@@ -105,6 +120,13 @@ var metricsSkipPaths = map[string]struct{}{
 	"/robots.txt":  {},
 }
 
+// metricsKnownPaths is the set of routes this API actually serves.
+// Any request path not in this set is recorded under the label "unknown" to
+// prevent a cardinality explosion when automated scanners probe arbitrary paths.
+var metricsKnownPaths = map[string]struct{}{
+	"/collection": {},
+}
+
 // metricsMiddleware records http_requests_total and http_request_duration_seconds
 // for every request passing through it. Paths in metricsSkipPaths are not
 // recorded. It is a no-op when metrics are not initialised (e.g. in unit tests
@@ -120,11 +142,15 @@ func (a *app) metricsMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		rw := &statusResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+		pathLabel := r.URL.Path
+		if _, ok := metricsKnownPaths[pathLabel]; !ok {
+			pathLabel = "unknown"
+		}
 		start := time.Now()
 		next.ServeHTTP(rw, r)
 		duration := time.Since(start).Seconds()
-		a.requestsTotal.WithLabelValues(r.Method, r.URL.Path, strconv.Itoa(rw.statusCode)).Inc()
-		a.requestDuration.WithLabelValues(r.Method, r.URL.Path).Observe(duration)
+		a.requestsTotal.WithLabelValues(r.Method, pathLabel, strconv.Itoa(rw.statusCode)).Inc()
+		a.requestDuration.WithLabelValues(r.Method, pathLabel).Observe(duration)
 	})
 }
 
@@ -176,6 +202,14 @@ func corsMiddleware(allowedOrigin string, next http.Handler) http.Handler {
 	})
 }
 
+// notFoundHandler is the catch-all route. It logs the request so that scanner
+// and probe traffic is visible in structured logs, then returns a bare 404 with
+// no body to avoid leaking information to automated scanners.
+func notFoundHandler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("404 %s %s %q", r.Method, r.URL.Path, r.Header.Get("User-Agent"))
+	w.WriteHeader(http.StatusNotFound)
+}
+
 // healthHandler is a simple liveness probe used by Kubernetes to know the
 // container is up. No logic — just return 200 OK with a JSON body.
 func healthHandler(w http.ResponseWriter, _ *http.Request) {
@@ -211,6 +245,17 @@ func (a *app) collectionHandler(w http.ResponseWriter, r *http.Request) {
 		"%s/users/%s/collection/folders/0/releases?per_page=50&page=%d",
 		a.discogsBase, url.PathEscape(username), page,
 	)
+
+	// Check Redis cache before hitting Discogs.
+	cacheKey := fmt.Sprintf("collection:%s:%d", username, page)
+	if a.redisClient != nil {
+		if cached, err := a.redisClient.Get(r.Context(), cacheKey).Bytes(); err == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Cache", "HIT")
+			w.Write(cached) //nolint:errcheck
+			return
+		}
+	}
 
 	dc, err := a.fetchPage(r.Context(), a.token, pageURL)
 	if err != nil {
@@ -258,10 +303,19 @@ func (a *app) collectionHandler(w http.ResponseWriter, r *http.Request) {
 		Releases: items,
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
+	b, err := json.Marshal(resp)
+	if err != nil {
 		log.Printf("encode error: %v", err)
+		writeJSONError(w, "internal error", http.StatusInternalServerError)
+		return
 	}
+	if a.redisClient != nil {
+		if setErr := a.redisClient.Set(r.Context(), cacheKey, b, a.cacheTTL).Err(); setErr != nil {
+			log.Printf("cache set error: %v", setErr)
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(b) //nolint:errcheck
 }
 
 func main() {
@@ -298,6 +352,31 @@ func main() {
 	})
 	reg.MustRegister(requestsTotal, requestDuration, collectionSize)
 
+	// Service Binding root — $SERVICE_BINDING_ROOT env or /bindings by convention.
+	bindingRoot := os.Getenv("SERVICE_BINDING_ROOT")
+	if bindingRoot == "" {
+		bindingRoot = "/bindings"
+	}
+	var redisClient *redis.Client
+	if host := readBindingFile(bindingRoot, "cache", "host"); host != "" {
+		port := readBindingFile(bindingRoot, "cache", "port")
+		if port == "" {
+			port = "6379"
+		}
+		redisClient = redis.NewClient(&redis.Options{
+			Addr: host + ":" + port,
+		})
+		log.Printf("cache: Redis at %s:%s", host, port)
+	} else {
+		log.Printf("cache: no binding found, caching disabled")
+	}
+	cacheTTL := 5 * time.Minute
+	if ttlStr := os.Getenv("CACHE_TTL"); ttlStr != "" {
+		if d, err := time.ParseDuration(ttlStr); err == nil {
+			cacheTTL = d
+		}
+	}
+
 	a := &app{
 		discogsBase:     "https://api.discogs.com",
 		httpClient:      &http.Client{Timeout: 15 * time.Second},
@@ -306,6 +385,8 @@ func main() {
 		collectionSize:  collectionSize,
 		requestsTotal:   requestsTotal,
 		requestDuration: requestDuration,
+		redisClient:     redisClient,
+		cacheTTL:        cacheTTL,
 	}
 	// Fail fast at startup rather than returning errors on every request.
 	if a.token == "" {
@@ -315,6 +396,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/collection", a.collectionHandler)
+	mux.HandleFunc("/", notFoundHandler)
 
 	// Wrap the whole mux: metrics outermost so every request is counted, then CORS.
 	// Only the SPA origin is allowed — browsers will block requests from any other site.

@@ -10,6 +10,56 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
+// TestNotFoundHandler verifies that unrecognised paths return 404 with no body.
+func TestNotFoundHandler(t *testing.T) {
+	for _, path := range []string{"/", "/.env", "/.git/config", "/wp-login.php", "/phpinfo.php"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		notFoundHandler(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("path %q: expected 404, got %d", path, w.Code)
+		}
+		if w.Body.Len() != 0 {
+			t.Errorf("path %q: expected empty body, got %q", path, w.Body.String())
+		}
+	}
+}
+
+// TestMetricsMiddlewareNormalizesUnknownPaths verifies that scanner/probe paths
+// are all bucketed under the "unknown" label instead of their raw paths, which
+// would cause a Prometheus label cardinality explosion.
+func TestMetricsMiddlewareNormalizesUnknownPaths(t *testing.T) {
+	requestsTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "test_normalize_http_requests_total",
+		Help: "test",
+	}, []string{"method", "path", "status_code"})
+	requestDuration := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "test_normalize_http_request_duration_seconds",
+		Help:    "test",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"method", "path"})
+
+	a := &app{requestsTotal: requestsTotal, requestDuration: requestDuration}
+	handler := a.metricsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+
+	for _, path := range []string{"/.env", "/.git/config", "/wp-login.php"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+	}
+
+	// All three unknown paths should be recorded under the single "unknown" label.
+	if got := testutil.ToFloat64(requestsTotal.WithLabelValues("GET", "unknown", "404")); got != 3 {
+		t.Fatalf("expected counter=3 for unknown paths, got %v", got)
+	}
+	// Raw paths must not appear as individual label values.
+	if got := testutil.ToFloat64(requestsTotal.WithLabelValues("GET", "/.env", "404")); got != 0 {
+		t.Fatalf("expected counter=0 for /.env, got %v", got)
+	}
+}
+
 // TestHealthHandler verifies the health endpoint returns 200 with {"status":"ok","version":"..."}.
 func TestHealthHandler(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
