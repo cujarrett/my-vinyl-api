@@ -43,7 +43,7 @@ Dockerfile       # Multi-stage ARM64 build
 
 | Method | Path          | Description                                  |
 |--------|---------------|----------------------------------------------|
-| GET    | `/health`     | Liveness probe — returns `{"status":"ok","version":"x.y.z"}` |
+| GET    | `/healthz`    | Liveness probe — returns `{"status":"ok","version":"x.y.z"}` |
 | GET    | `/collection` | Full paginated Discogs collection as flat JSON array |
 
 Query params: `?username=` overrides the default username (`cujarrett`).

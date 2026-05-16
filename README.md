@@ -7,7 +7,7 @@ Go proxy that exposes a Discogs vinyl collection as a clean JSON API.
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/collection` | Returns one page of the collection as a paginated envelope |
-| `GET` | `/health` | Returns `{"status":"ok","version":"..."}` |
+| `GET` | `/healthz` | Returns `{"status":"ok","version":"..."}` |
 
 ### `GET /collection` query params
 

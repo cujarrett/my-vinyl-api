@@ -115,10 +115,8 @@ func (rw *statusResponseWriter) WriteHeader(code int) {
 // to avoid polluting metrics with noise (probes, browser auto-requests, etc.).
 var metricsSkipPaths = map[string]struct{}{
 	"/favicon.ico": {},
-	"/health":      {},
 	"/healthz":     {},
 	"/robots.txt":  {},
-}
 
 // metricsKnownPaths is the set of routes this API actually serves.
 // Any request path not in this set is recorded under the label "unknown" to
@@ -394,7 +392,7 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/healthz", healthHandler)
 	mux.HandleFunc("/collection", a.collectionHandler)
 	mux.HandleFunc("/", notFoundHandler)
 
