@@ -117,6 +117,7 @@ var metricsSkipPaths = map[string]struct{}{
 	"/favicon.ico": {},
 	"/healthz":     {},
 	"/robots.txt":  {},
+}
 
 // metricsKnownPaths is the set of routes this API actually serves.
 // Any request path not in this set is recorded under the label "unknown" to
