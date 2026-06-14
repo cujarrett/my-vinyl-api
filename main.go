@@ -42,6 +42,7 @@ type discogsBasicInfo struct {
 
 type discogsRelease struct {
 	ID               int              `json:"id"`
+	DateAdded        string           `json:"date_added"`
 	BasicInformation discogsBasicInfo `json:"basic_information"`
 }
 
@@ -60,12 +61,13 @@ type discogsCollection struct {
 // Outbound shapes
 
 type collectionItem struct {
-	ID       int    `json:"id"`
-	Artist   string `json:"artist"`
-	Title    string `json:"title"`
-	Year     int    `json:"year"`
-	Label    string `json:"label"`
-	CoverURL string `json:"cover_url"`
+	ID        int    `json:"id"`
+	Artist    string `json:"artist"`
+	Title     string `json:"title"`
+	Year      int    `json:"year"`
+	Label     string `json:"label"`
+	CoverURL  string `json:"cover_url"`
+	DateAdded string `json:"date_added"`
 }
 
 // collectionResponse is the envelope returned by GET /collection.
@@ -81,6 +83,8 @@ type app struct {
 	discogsBase     string
 	httpClient      *http.Client
 	token           string
+	consumerKey     string
+	consumerSecret  string
 	defaultUsername string
 	collectionSize  prometheus.Gauge
 	requestsTotal   *prometheus.CounterVec
@@ -163,7 +167,11 @@ func (a *app) fetchPage(ctx context.Context, token, url string) (discogsCollecti
 
 	// Discogs requires a descriptive User-Agent — requests without one are rejected.
 	req.Header.Set("User-Agent", "my-vinyl-api/1.0 +https://github.com/cujarrett/my-vinyl-api")
-	req.Header.Set("Authorization", "Discogs token="+token)
+	if token != "" {
+		req.Header.Set("Authorization", "Discogs token="+token)
+	} else {
+		req.Header.Set("Authorization", fmt.Sprintf("Discogs key=%s, secret=%s", a.consumerKey, a.consumerSecret))
+	}
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
@@ -276,10 +284,11 @@ func (a *app) collectionHandler(w http.ResponseWriter, r *http.Request) {
 	items := make([]collectionItem, 0, len(dc.Releases))
 	for _, rel := range dc.Releases {
 		item := collectionItem{
-			ID:       rel.ID,
-			Title:    rel.BasicInformation.Title,
-			Year:     rel.BasicInformation.Year,
-			CoverURL: rel.BasicInformation.CoverImage,
+			ID:        rel.ID,
+			Title:     rel.BasicInformation.Title,
+			Year:      rel.BasicInformation.Year,
+			CoverURL:  rel.BasicInformation.CoverImage,
+			DateAdded: rel.DateAdded,
 		}
 		// Guard against empty slices before indexing — some releases have no artist/label.
 		if len(rel.BasicInformation.Artists) > 0 {
@@ -380,6 +389,8 @@ func main() {
 		discogsBase:     "https://api.discogs.com",
 		httpClient:      &http.Client{Timeout: 15 * time.Second},
 		token:           os.Getenv("DISCOGS_TOKEN"),
+		consumerKey:     os.Getenv("DISCOGS_CONSUMER_KEY"),
+		consumerSecret:  os.Getenv("DISCOGS_CONSUMER_SECRET"),
 		defaultUsername: "cujarrett",
 		collectionSize:  collectionSize,
 		requestsTotal:   requestsTotal,
@@ -388,8 +399,8 @@ func main() {
 		cacheTTL:        cacheTTL,
 	}
 	// Fail fast at startup rather than returning errors on every request.
-	if a.token == "" {
-		log.Fatal("DISCOGS_TOKEN is required")
+	if a.token == "" && (a.consumerKey == "" || a.consumerSecret == "") {
+		log.Fatal("DISCOGS_TOKEN or both DISCOGS_CONSUMER_KEY and DISCOGS_CONSUMER_SECRET are required")
 	}
 
 	mux := http.NewServeMux()
