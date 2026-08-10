@@ -22,7 +22,9 @@ WORKDIR /app
 
 COPY --from=builder /app/my-vinyl-api .
 
-USER app
+# Numeric, not the name — the kubelet cannot verify runAsNonRoot for a user it
+# cannot resolve, and fails the container closed. Same uid the account already has.
+USER 100
 
 EXPOSE 8080
 
