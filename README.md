@@ -33,7 +33,7 @@ Response shape:
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `DISCOGS_TOKEN` | yes | — | Discogs API token from [discogs.com/settings/developers](https://www.discogs.com/settings/developers) |
+| `DISCOGS_TOKEN` | yes | - | Discogs API token from [discogs.com/settings/developers](https://www.discogs.com/settings/developers) |
 | `PORT` | no | `8080` | Port the server listens on |
 
 ## Run locally

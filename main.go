@@ -165,7 +165,7 @@ func (a *app) fetchPage(ctx context.Context, token, url string) (discogsCollecti
 		return discogsCollection{}, err
 	}
 
-	// Discogs requires a descriptive User-Agent — requests without one are rejected.
+	// Discogs requires a descriptive User-Agent - requests without one are rejected.
 	req.Header.Set("User-Agent", "my-vinyl-api/1.0 +https://github.com/cujarrett/my-vinyl-api")
 	if token != "" {
 		req.Header.Set("Authorization", "Discogs token="+token)
@@ -191,7 +191,7 @@ func (a *app) fetchPage(ctx context.Context, token, url string) (discogsCollecti
 }
 
 // writeJSONError is a small helper to send a consistent JSON error body.
-// Setting the header before WriteHeader is important — headers can't be
+// Setting the header before WriteHeader is important - headers can't be
 // changed after the status code is written.
 func writeJSONError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
@@ -218,7 +218,7 @@ func notFoundHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // healthHandler is a simple liveness probe used by Kubernetes to know the
-// container is up. No logic — just return 200 OK with a JSON body.
+// container is up. No logic - just return 200 OK with a JSON body.
 func healthHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"status":"ok","version":%q}`, version) //nolint:errcheck
@@ -290,7 +290,7 @@ func (a *app) collectionHandler(w http.ResponseWriter, r *http.Request) {
 			CoverURL:  rel.BasicInformation.CoverImage,
 			DateAdded: rel.DateAdded,
 		}
-		// Guard against empty slices before indexing — some releases have no artist/label.
+		// Guard against empty slices before indexing - some releases have no artist/label.
 		if len(rel.BasicInformation.Artists) > 0 {
 			item.Artist = rel.BasicInformation.Artists[0].Name
 		}
@@ -360,7 +360,7 @@ func main() {
 	})
 	reg.MustRegister(requestsTotal, requestDuration, collectionSize)
 
-	// Service Binding root — $SERVICE_BINDING_ROOT env or /bindings by convention.
+	// Service Binding root - $SERVICE_BINDING_ROOT env or /bindings by convention.
 	bindingRoot := os.Getenv("SERVICE_BINDING_ROOT")
 	if bindingRoot == "" {
 		bindingRoot = "/bindings"
@@ -409,11 +409,11 @@ func main() {
 	mux.HandleFunc("/", notFoundHandler)
 
 	// Wrap the whole mux: metrics outermost so every request is counted, then CORS.
-	// Only the SPA origin is allowed — browsers will block requests from any other site.
+	// Only the SPA origin is allowed - browsers will block requests from any other site.
 	handler := a.metricsMiddleware(corsMiddleware("https://myvinyl.mattjarrett.dev", mux))
 
 	// Start the metrics server on a separate port. This port is never publicly
-	// exposed — only the in-cluster Prometheus scraper reaches it.
+	// exposed - only the in-cluster Prometheus scraper reaches it.
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	metricsSrv := &http.Server{
