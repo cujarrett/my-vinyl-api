@@ -83,6 +83,7 @@ type app struct {
 	discogsBase     string
 	httpClient      *http.Client
 	token           string
+	tokenFile       string
 	consumerKey     string
 	consumerSecret  string
 	defaultUsername string
@@ -101,6 +102,19 @@ func readBindingFile(root, binding, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(b))
+}
+
+// discogsToken prefers the mounted file so a rotated token is picked up without a
+// restart. The env var stays as the fallback, which is how it is set locally.
+func (a *app) discogsToken() string {
+	if a.tokenFile != "" {
+		if b, err := os.ReadFile(a.tokenFile); err == nil {
+			if t := strings.TrimSpace(string(b)); t != "" {
+				return t
+			}
+		}
+	}
+	return a.token
 }
 
 // statusResponseWriter wraps http.ResponseWriter to capture the status code
@@ -264,7 +278,7 @@ func (a *app) collectionHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	dc, err := a.fetchPage(r.Context(), a.token, pageURL)
+	dc, err := a.fetchPage(r.Context(), a.discogsToken(), pageURL)
 	if err != nil {
 		writeJSONError(w, "failed to fetch collection", http.StatusBadGateway)
 		return
@@ -385,10 +399,16 @@ func main() {
 		}
 	}
 
+	// The platform mounts secretsFrom Secrets at /secrets/<secret>/<key>.
+	tokenFile := os.Getenv("DISCOGS_TOKEN_FILE")
+	if tokenFile == "" {
+		tokenFile = "/secrets/discogs-credentials/DISCOGS_TOKEN"
+	}
 	a := &app{
 		discogsBase:     "https://api.discogs.com",
 		httpClient:      &http.Client{Timeout: 15 * time.Second},
 		token:           os.Getenv("DISCOGS_TOKEN"),
+		tokenFile:       tokenFile,
 		consumerKey:     os.Getenv("DISCOGS_CONSUMER_KEY"),
 		consumerSecret:  os.Getenv("DISCOGS_CONSUMER_SECRET"),
 		defaultUsername: "cujarrett",
@@ -399,7 +419,7 @@ func main() {
 		cacheTTL:        cacheTTL,
 	}
 	// Fail fast at startup rather than returning errors on every request.
-	if a.token == "" && (a.consumerKey == "" || a.consumerSecret == "") {
+	if a.discogsToken() == "" && (a.consumerKey == "" || a.consumerSecret == "") {
 		log.Fatal("DISCOGS_TOKEN or both DISCOGS_CONSUMER_KEY and DISCOGS_CONSUMER_SECRET are required")
 	}
 
