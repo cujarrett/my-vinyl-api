@@ -369,3 +369,19 @@ func TestCollectionPageExceedsTotalReturns400(t *testing.T) {
 		t.Fatalf("expected 400, got %d", w.Code)
 	}
 }
+
+func TestCollectionUnknownUserReturns404(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	a := &app{discogsBase: ts.URL, httpClient: ts.Client(), token: "test-token", defaultUsername: "test-user"}
+	req := httptest.NewRequest(http.MethodGet, "/collection?username=nobody", nil)
+	w := httptest.NewRecorder()
+	a.collectionHandler(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}

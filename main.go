@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -171,6 +172,9 @@ func (a *app) metricsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// errUserNotFound is Discogs answering 404 for a username that does not exist.
+var errUserNotFound = errors.New("discogs user not found")
+
 // fetchPage makes a single authenticated GET request to Discogs and decodes
 // the response into a discogsCollection.
 func (a *app) fetchPage(ctx context.Context, token, url string) (discogsCollection, error) {
@@ -193,6 +197,9 @@ func (a *app) fetchPage(ctx context.Context, token, url string) (discogsCollecti
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode == http.StatusNotFound {
+		return discogsCollection{}, errUserNotFound
+	}
 	if resp.StatusCode != http.StatusOK {
 		return discogsCollection{}, fmt.Errorf("upstream status %d", resp.StatusCode)
 	}
@@ -279,6 +286,10 @@ func (a *app) collectionHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dc, err := a.fetchPage(r.Context(), a.discogsToken(), pageURL)
+	if errors.Is(err, errUserNotFound) {
+		writeJSONError(w, "user not found", http.StatusNotFound)
+		return
+	}
 	if err != nil {
 		writeJSONError(w, "failed to fetch collection", http.StatusBadGateway)
 		return
