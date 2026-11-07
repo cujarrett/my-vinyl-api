@@ -36,6 +36,12 @@ Response shape:
 | `DISCOGS_TOKEN` | yes | - | Discogs API token from [discogs.com/settings/developers](https://www.discogs.com/settings/developers) |
 | `PORT` | no | `8080` | Port the server listens on |
 
+To rotate the cluster's Discogs token, regenerate it at [discogs.com/settings/developers](https://www.discogs.com/settings/developers), then run this. It prompts for the value.
+
+```bash
+~/Developer/homelab/scripts/rotate-secret/rotate-secret.sh platform/my-vinyl/discogs-credentials my-vinyl/deployment/my-vinyl-api
+```
+
 ## Run locally
 
 ```bash
