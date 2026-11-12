@@ -4,9 +4,9 @@
 
 - **Never run `git commit`, `git push`, or any git command that writes to or modifies repository history or remotes.** If a task requires committing or pushing, stop and tell the user to run the git command manually.
 - **Never add a `Co-Authored-By` trailer or a "Generated with Claude Code" line** to commit messages or PR descriptions, including in suggested commit messages. Commits are authored by the user alone.
-- Do not add external dependencies - stdlib only.
-- Do not use global variables - put state on the `app` struct.
-- Do not call `os.Getenv` inside handlers - read config once in `main()`.
+- Standard library first. The Prometheus client and go-redis are the only dependencies.
+- Put state on the `app` struct, with no global variables.
+- Read config once in `main()`. Handlers never call `os.Getenv`.
 - Keep all application code in `main.go` and all tests in `main_test.go` unless the file grows large enough to warrant splitting.
 
 ### Pre-commit safety check
@@ -15,80 +15,66 @@ Before telling the user to commit, always run `/security-review`. It reviews the
 
 ## Project Overview
 
-A Go REST API that proxies the Discogs API to serve a personal vinyl collection. Deployed on a homelab Kubernetes cluster (ARM64) via Cloudflare Tunnel at `https://my-vinyl-api.mattjarrett.dev`. The SPA that consumes this API is served from `https://myvinyl.mattjarrett.dev`.
+A Go REST API that proxies the Discogs API to serve a vinyl collection. It runs on the homelab cluster (ARM64) and is cluster-internal, at `my-vinyl-api.local.lab`. The SPA at `https://myvinyl.mattjarrett.dev` reaches it through the platform's nginx, which proxies `/api/` to it.
 
 ## Tech Stack
 
-- **Language**: Go 1.26, stdlib only - no external dependencies
+- **Language**: Go, standard library first
 - **Container**: Multi-stage Dockerfile, `linux/arm64`, non-root user
 - **CI/CD**: GitHub Actions → GHCR (`ghcr.io/cujarrett/my-vinyl-api`)
-- **Deployment**: Kubernetes via homelab XApi Crossplane XR
+- **Deployment**: a homelab `Api`, defined at `my-vinyl/my-vinyl-api.yaml` in `homelab-workspaces`
 
 ## Project Structure
 
 ```
-main.go          # All application code - single file
-main_test.go     # All tests - httptest only, no real network calls
+main.go          # All application code, in a single file
+main_test.go     # All tests, httptest only, no real network calls
 go.mod           # Module: github.com/cujarrett/my-vinyl-api
 Dockerfile       # Multi-stage ARM64 build
 .github/
   workflows/
-    ci.yml       # Test + lint on PRs, build+push to GHCR on main
+    ci.yml       # test, build-and-push, deploy
 ```
 
 ## Architecture
 
-- `app` struct holds all dependencies (`discogsBase`, `httpClient`, `token`, `defaultUsername`)
+- `app` struct holds every dependency: the Discogs settings, the Prometheus metrics and the optional Redis client
 - Config is read once at startup in `main()`, never per-request
 - Handlers are methods on `*app` for testability without globals
-- Pagination follows Discogs `pagination.urls.next` in a loop until empty
-- CORS locked to `https://myvinyl.mattjarrett.dev` - not a wildcard
+- The cache is Redis, found through the `cache` service binding. With no binding, caching is off
+- CORS is locked to `https://myvinyl.mattjarrett.dev`, never a wildcard
 
 ## Endpoints
 
-| Method | Path          | Description                                  |
-|--------|---------------|----------------------------------------------|
-| GET    | `/healthz`    | Liveness probe - returns `{"status":"ok","version":"x.y.z"}` |
-| GET    | `/collection` | Full paginated Discogs collection as flat JSON array |
-
-Query params: `?username=` overrides the default username (`cujarrett`).
+[README → Endpoints](./README.md#endpoints) has `/collection` and `/healthz`. `/metrics` is served on `METRICS_PORT`, apart from the main port.
 
 ## Environment Variables
 
-| Variable        | Required | Default    | Description            |
-|-----------------|----------|------------|------------------------|
-| `DISCOGS_TOKEN` | Yes      | -          | Discogs API token      |
-| `PORT`          | No       | `8080`     | Port to listen on      |
+| Variable | Default | Description |
+|---|---|---|
+| `DISCOGS_TOKEN` | none | Discogs API token, for local dev |
+| `DISCOGS_TOKEN_FILE` | `/secrets/discogs-credentials/DISCOGS_TOKEN` | Path to the token file the platform mounts |
+| `DISCOGS_CONSUMER_KEY`, `DISCOGS_CONSUMER_SECRET` | none | Used together in place of a token |
+| `PORT` | `8080` | Port to listen on |
+| `METRICS_PORT` | `9090` | Port for `/metrics` |
+| `SERVICE_BINDING_ROOT` | `/bindings` | Where the platform mounts service bindings |
+| `CACHE_TTL` | `5m` | How long a cached Discogs response lives |
 
 ## Coding Conventions
 
-- Stdlib only - do not add external dependencies to `go.mod`
-- No package-level globals - all state lives on the `app` struct
-- Read config once at startup, not per-request
 - Fail fast: use `log.Fatal` at startup for missing required config
-- `defer func() { _ = resp.Body.Close() }()` - explicit discard for `errcheck`
-- All tests use `httptest.NewServer` / `httptest.NewRecorder` - no real network calls, no env var dependencies
+- `defer func() { _ = resp.Body.Close() }()` is the explicit discard that `errcheck` wants
+- All tests use `httptest.NewServer` and `httptest.NewRecorder`, with no real network calls and no env var dependencies
 
 ## Local Development
 
-```bash
-# Run tests
-go test ./...
-
-# Lint
-go vet ./...
-
-# Build
-go build -o my-vinyl-api .
-
-# Run (requires DISCOGS_TOKEN)
-DISCOGS_TOKEN=your_token ./my-vinyl-api
-```
+`just ci` runs lint, test and build. `DISCOGS_TOKEN=your_token just run` starts it locally. `just --list` shows every recipe.
 
 ## CI/CD
 
-- **`test` job**: runs on all pushes and PRs - `go test ./...` then `go vet ./...`
-- **`build-and-push` job**: runs on `main` only after `test` passes - builds ARM64 Docker image and pushes to GHCR with `:main` and `:sha-<sha>` tags
+- **`test` job**: runs on all pushes and PRs. `go test ./...` then `go vet ./...`.
+- **`build-and-push` job**: runs on `main` after `test` passes. Builds the ARM64 image and pushes it to GHCR with `:main` and `:sha-<sha>` tags.
+- **`deploy` job**: runs after `build-and-push`. Updates the image tag in `homelab-workspaces`.
 
 ## Version
 
